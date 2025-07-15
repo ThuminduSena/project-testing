@@ -1,17 +1,21 @@
-name: Python Lint
+name: Security - Bandit SAST
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+
+permissions:
+  contents: read
+  security-events: write  # required for uploading SARIF to GitHub Security tab
 
 jobs:
-  lint:
+  bandit-sast:
+    name: Run Bandit SAST (Python)
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -19,8 +23,32 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Run flake8
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit and generate SARIF and JSON reports
         run: |
-          flake8 . --config=.flake8
+          mkdir -p reports
+          bandit -r . -f json -o reports/bandit-report.json
+          bandit -r . -f sarif -o reports/bandit.sarif
 
+      - name: Upload Bandit JSON report as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: bandit-json-report
+          path: reports/bandit-report.json
 
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: reports/bandit.sarif
+
+      - name: Fail build on high severity issues
+        run: |
+          HIGH_ISSUES=$(jq '[.results[] | select(.issue_severity == "HIGH")] | length' reports/bandit-report.json)
+          if [ "$HIGH_ISSUES" -gt 0 ]; then
+            echo "::error::Found $HIGH_ISSUES high severity issues!"
+            exit 1
+          else
+            echo "No high severity issues found."
+          fi
