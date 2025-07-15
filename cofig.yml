@@ -29,8 +29,8 @@ jobs:
       - name: Run Bandit and generate SARIF and JSON reports
         run: |
           mkdir -p reports
-          bandit -r . -f json -o reports/bandit-report.json
-          bandit -r . -f sarif -o reports/bandit.sarif
+          bandit -r . -f json -o reports/bandit-report.json -c .bandit.yml
+          bandit -r . -f sarif -o reports/bandit.sarif -c .bandit.yml
 
       - name: Upload Bandit JSON report as artifact
         uses: actions/upload-artifact@v3
