@@ -1,54 +1,59 @@
-name: Security - Bandit SAST
+# .github/workflows/ci-injection-demo.yml
+name: CI Injection Demo (VULNERABLE)
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # DANGEROUS: runs with repo-level tokens on code from forks
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      script_url:
+        description: "URL to a shell script to run (DANGEROUS)"
+        required: false
+        default: ""
 
-permissions:
-  contents: read
-  security-events: write  # required for uploading SARIF to GitHub Security tab
+permissions: write-all # overly broad on purpose
 
 jobs:
-  bandit-sast:
-    name: Run Bandit SAST (Python)
+  build:
     runs-on: ubuntu-latest
-
+    env:
+      # VULN: pulls untrusted user-controlled data into env
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BODY:  ${{ github.event.pull_request.body }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Checkout PR head (UNTRUSTED CODE with elevated perms)
+        # VULN: running untrusted PR code using pull_request_target context
+        uses: actions/checkout@v4
         with:
-          python-version: '3.10'
+          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Install Bandit
-        run: pip install bandit
-
-      - name: Run Bandit and generate SARIF and JSON reports
+      - name: Leak secret to logs (for demo)
+        # VULN: prints secrets; they can be exfiltrated by untrusted steps
+        env:
+          SUPER_SECRET: ${{ secrets.SUPER_SECRET }}
         run: |
-          mkdir -p reports
-          bandit -r . -f json -o reports/bandit-report.json -c .bandit.yml
-          bandit -r . -f sarif -o reports/bandit.sarif -c .bandit.yml
+          echo "Secret is: $SUPER_SECRET"   # <-- intentionally leaking for demo
 
-      - name: Upload Bandit JSON report as artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: bandit-json-report
-          path: reports/bandit-report.json
-
-      - name: Upload SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: reports/bandit.sarif
-
-      - name: Fail build on high severity issues
+      - name: Command injection via PR title
+        # VULN: executes user-controlled value in a shell
         run: |
-          HIGH_ISSUES=$(jq '[.results[] | select(.issue_severity == "HIGH")] | length' reports/bandit-report.json)
-          if [ "$HIGH_ISSUES" -gt 0 ]; then
-            echo "::error::Found $HIGH_ISSUES high severity issues!"
-            exit 1
-          else
-            echo "No high severity issues found."
-          fi
+          echo "Running title as command (DANGEROUS)"
+          bash -lc "$PR_TITLE"              # e.g., PR title: echo HACKED
+
+      - name: Source untrusted PR body as env
+        # VULN: PR body could contain something like: FOO=$(echo HACKED); echo $FOO
+        run: |
+          printf "%s\n" "$PR_BODY" > .env
+          # DANGEROUS: executes anything in PR body
+          set -a
+          . ./.env
+          set +a
+          echo "Loaded env from PR body"
+
+      - name: Curl | bash from user input
+        if: ${{ github.event.inputs.script_url != '' }}
+        # VULN: arbitrary remote code exec from an unvalidated URL
+        run: |
+          echo "Fetching and executing ${{ github.event.inputs.script_url }}"
+          curl -fsSL "${{ github.event.inputs.script_url }}" | bash
