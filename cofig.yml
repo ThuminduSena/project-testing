@@ -1,59 +1,77 @@
-# .github/workflows/ci-injection-demo.yml
-name: CI Injection Demo (VULNERABLE)
+name: Push-to-Branch SAST Checkpoint
 
 on:
-  # DANGEROUS: runs with repo-level tokens on code from forks
-  pull_request_target:
-    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+      - dev
+      - feature/*
+  # Optional: Allow manual trigger
   workflow_dispatch:
-    inputs:
-      script_url:
-        description: "URL to a shell script to run (DANGEROUS)"
-        required: false
-        default: ""
 
-permissions: write-all # overly broad on purpose
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
-  build:
+  sast-scan:
+    name: Static Code Analysis (Push-to-Branch)
     runs-on: ubuntu-latest
-    env:
-      # VULN: pulls untrusted user-controlled data into env
-      PR_TITLE: ${{ github.event.pull_request.title }}
-      PR_BODY:  ${{ github.event.pull_request.body }}
+
     steps:
-      - name: Checkout PR head (UNTRUSTED CODE with elevated perms)
-        # VULN: running untrusted PR code using pull_request_target context
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          python-version: '3.11'
 
-      - name: Leak secret to logs (for demo)
-        # VULN: prints secrets; they can be exfiltrated by untrusted steps
-        env:
-          SUPER_SECRET: ${{ secrets.SUPER_SECRET }}
-        run: |
-          echo "Secret is: $SUPER_SECRET"   # <-- intentionally leaking for demo
+      # Optional cache step to speed up repeated scans
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-      - name: Command injection via PR title
-        # VULN: executes user-controlled value in a shell
+      - name: Install dependencies
         run: |
-          echo "Running title as command (DANGEROUS)"
-          bash -lc "$PR_TITLE"              # e.g., PR title: echo HACKED
+          pip install -r requirements.txt || true
+          pip install semgrep
 
-      - name: Source untrusted PR body as env
-        # VULN: PR body could contain something like: FOO=$(echo HACKED); echo $FOO
-        run: |
-          printf "%s\n" "$PR_BODY" > .env
-          # DANGEROUS: executes anything in PR body
-          set -a
-          . ./.env
-          set +a
-          echo "Loaded env from PR body"
+      # 🔍 CodeQL initialization
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+          queries: security-extended
 
-      - name: Curl | bash from user input
-        if: ${{ github.event.inputs.script_url != '' }}
-        # VULN: arbitrary remote code exec from an unvalidated URL
+      # 🧠 Run CodeQL Analysis
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "push-to-branch-sast"
+
+      # ⚡ Run Semgrep scan for fast static checks
+      - name: Run Semgrep SAST scan
+        run: semgrep --config auto --error --json --output semgrep-report.json || echo "Semgrep found issues"
+
+      # ✅ Upload results to GitHub Security tab
+      - name: Upload SARIF results (CodeQL + Semgrep)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-report.json
+
+      # Optional: Fail the pipeline if critical issues are found
+      - name: Enforce Security Threshold
+        if: always()
         run: |
-          echo "Fetching and executing ${{ github.event.inputs.script_url }}"
-          curl -fsSL "${{ github.event.inputs.script_url }}" | bash
+          CRITICAL_COUNT=$(grep -o '"severity": *"ERROR"' semgrep-report.json | wc -l)
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical SAST findings detected ($CRITICAL_COUNT). Failing build."
+            exit 1
+          else
+            echo "✅ No critical SAST issues found."
+          fi
