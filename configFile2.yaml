@@ -1,0 +1,141 @@
+name: Push-to-Branch SAST CI/CD Pipeline
+
+# Trigger pipeline on push to main, dev, or feature branches, and allow manual workflow_dispatch
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - feature/*
+  workflow_dispatch:
+
+# Permissions for security scanning
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # Checkout and setup
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt || true
+          pip install semgrep
+
+  # Build stage
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build
+        run: echo "Build logic here, e.g., python setup.py build"
+
+  # Test stage
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        run: pytest tests/ --maxfail=1 --disable-warnings -q
+
+  # Push-to-Branch SAST Scan
+  push_sast:
+    name: Static Code Analysis (Push-to-Branch)
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Optional cache step to speed up repeated scans
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt || true
+          pip install semgrep
+
+      # CodeQL initialization
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+          queries: security-extended
+
+      # CodeQL analysis
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "push-to-branch-sast"
+
+      # Semgrep SAST scan
+      - name: Run Semgrep Scan
+        run: semgrep --config auto --error --json --output semgrep-report.json || echo "Semgrep found issues"
+
+      # Upload SARIF results
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-report.json
+
+      # Optional enforcement
+      - name: Enforce Security Threshold
+        if: always()
+        run: |
+          CRITICAL_COUNT=$(grep -o '"severity": *"ERROR"' semgrep-report.json | wc -l)
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical SAST findings detected ($CRITICAL_COUNT). Failing build."
+            exit 1
+          else
+            echo "✅ No critical SAST issues found."
+
+  # Optional deploy stage
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy
+        run: echo "Deploy logic here, e.g., scp files to server or trigger deployment script"
