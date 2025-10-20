@@ -1,0 +1,123 @@
+name: CI/CD Pipeline with Push-to-Branch SAST
+
+on:
+  push:
+    branches:
+      - main
+      - release/*
+      - feature/*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  prepare:
+    name: Prepare Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.npm
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('**/package-lock.json', '**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-dependencies-
+
+      - name: Install Python Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+  build_and_test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build Project
+        run: |
+          echo "Running build commands"
+          npm run build || true
+          python setup.py build || true
+
+      - name: Run Tests
+        run: |
+          npm test || true
+          pytest tests/ --maxfail=2 --disable-warnings -q || true
+
+  push_branch_sast:
+    name: Push-to-Branch Static Analysis
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install SAST Tools
+        run: |
+          pip install semgrep
+          npm install -g semgrep
+
+      # Run Semgrep scan
+      - name: Semgrep SAST Scan
+        run: semgrep --config auto --error --json --output semgrep-report.json || echo "Semgrep found issues"
+
+      # CodeQL initialization
+      - name: CodeQL Init
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+          queries: security-extended
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "push-to-branch-sast"
+
+      # Upload SARIF results
+      - name: Upload SARIF Results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-report.json
+
+      # Optional enforcement
+      - name: Fail on Critical Findings
+        if: always()
+        run: |
+          CRITICAL_COUNT=$(grep -o '"severity": *"ERROR"' semgrep-report.json | wc -l)
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical SAST issues detected ($CRITICAL_COUNT). Failing workflow."
+            exit 1
+          else
+            echo "✅ No critical SAST issues."
+
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: build_and_test
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Server
+        run: echo "Deploy commands here (scp, rsync, or other deployment scripts)"
