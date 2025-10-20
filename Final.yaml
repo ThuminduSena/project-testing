@@ -1,0 +1,77 @@
+name: CI Pipeline (contains hardcoded secrets - FOR TESTING ONLY)
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+
+env:
+  # === Global hardcoded secrets (BAD) ===
+  GLOBAL_API_KEY: "hardcoded_api_key_12345"
+  GLOBAL_DB_PASSWORD: "P@ssw0rd!123"        # example: hardcoded DB password
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # === Job-level hardcoded secret (BAD) ===
+      JOB_TOKEN: "job_token_ABCDEF"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create bad .env with secret (BAD)
+        run: |
+          # This step writes a file with a hard-coded secret — insecure
+          echo "DATABASE_URL=postgres://user:hardcoded_db_pwd@db.example.com:5432/appdb" > .env
+          echo "API_KEY=hardcoded_key_98765" >> .env
+
+      - name: Build (example)
+        run: |
+          echo "Building..."
+
+      - name: Echo secret (BAD - exposes secret in logs)
+        run: |
+          echo "Job token is: $JOB_TOKEN"
+
+  security_scan:
+    name: Static scan (misconfigured with inline creds)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install semgrep
+        run: pip install semgrep
+
+      # === CLI invocation using an inline API key (BAD) ===
+      - name: Run tool that reads inline key (BAD)
+        run: |
+          # Example of invoking a tool using a hardcoded flag value
+          echo "Running scanner with inline key"
+          ./some-sast-tool --api-key="INLINE_TOOL_KEY_ABC" || true
+
+  deploy:
+    name: Deploy (contains fake cloud keys)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set fake AWS creds in environment (BAD)
+        run: |
+          # These are intentionally hard-coded here for testing – insecure
+          export AWS_ACCESS_KEY_ID="FAKEAWSACCESSKEY123"
+          export AWS_SECRET_ACCESS_KEY="FAKEAWSSECRETKEY456"
+          # Simulate usage (DO NOT USE REAL KEYS INLINE)
+          aws sts get-caller-identity || true
+
+      - name: Upload artifact (example)
+        run: echo "Deploying..."
+
+# End of workflow
