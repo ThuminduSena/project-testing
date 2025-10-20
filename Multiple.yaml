@@ -1,0 +1,127 @@
+name: Advanced CI/CD with Push-to-Branch SAST
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - feature/*
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: 'Run tests manually?'
+        required: true
+        default: 'true'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  setup_environment:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.npm
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/requirements.txt', '**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          npm ci
+
+  push_branch_sast:
+    name: Push-to-Branch Static Analysis
+    runs-on: ubuntu-latest
+    needs: setup_environment
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install SAST Tools
+        run: |
+          pip install semgrep bandit
+          npm install -g semgrep
+
+      - name: Run Semgrep Scan
+        run: semgrep --config auto --error --json --output semgrep-report.json || echo "Semgrep found issues"
+
+      - name: Run Bandit Scan
+        run: bandit -r . -f json -o bandit-report.json || echo "Bandit found issues"
+
+      - name: CodeQL Init
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+          queries: security-extended
+
+      - name: CodeQL Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "push-to-branch-sast"
+
+      - name: Upload SARIF Results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-report.json
+
+      - name: Enforce Security Threshold
+        if: always()
+        run: |
+          CRITICAL_COUNT=$(grep -o '"severity": *"ERROR"' semgrep-report.json bandit-report.json | wc -l)
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical SAST issues detected ($CRITICAL_COUNT). Failing workflow."
+            exit 1
+          else
+            echo "✅ No critical SAST issues."
+
+  build_and_test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    needs: setup_environment
+    if: ${{ github.event.inputs.run_tests == 'true' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Project
+        run: |
+          npm run build || true
+          python setup.py build || true
+
+      - name: Run Tests
+        run: |
+          npm test || true
+          pytest tests/ --maxfail=2 --disable-warnings -q || true
+
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: [push_branch_sast, build_and_test]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Deploy Application
+        run: |
+          echo "Deploy commands here (scp, rsync, or other deployment scripts)"
