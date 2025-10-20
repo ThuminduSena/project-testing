@@ -1,0 +1,84 @@
+name: CI/CD Pipeline with Build-Time SAST
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install semgrep bandit
+
+  build_and_sast:
+    name: Build and Static Analysis
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Project
+        run: python setup.py build || true
+
+      # 🔍 SAST during build
+      - name: Run Semgrep SAST Scan
+        run: semgrep --config auto --error --json --output semgrep-report.json || echo "Semgrep found issues"
+
+      - name: Run Bandit Security Scan
+        run: bandit -r . -f json -o bandit-report.json || echo "Bandit found issues"
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-report.json
+
+      - name: Enforce Security Threshold
+        if: always()
+        run: |
+          CRITICAL_COUNT=$(grep -o '"severity": *"ERROR"' semgrep-report.json bandit-report.json | wc -l)
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical SAST findings detected during build ($CRITICAL_COUNT)."
+            exit 1
+          else
+            echo "✅ No critical SAST issues detected during build."
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: build_and_sast
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Tests
+        run: pytest tests/ --maxfail=2 --disable-warnings -q || true
+
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Deploy
+        run: echo "Deploy scripts here"
